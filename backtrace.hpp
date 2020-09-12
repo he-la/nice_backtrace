@@ -366,11 +366,12 @@ void print_backtrace(size_t const skip_frames = 1) {
   }
 }
 
-void backtrace_assert(bool cond, char const *msg) {
+void backtrace_assert(bool cond, char const *msg,
+                      size_t const skip_frames = 2) {
   if (!cond) {
     std::cerr << "Assertion '\033[95m" << msg
               << "\033[0m' failed:" << std::endl;
-    print_backtrace(2);
+    print_backtrace(skip_frames);
     std::exit(-1);
   }
 }
