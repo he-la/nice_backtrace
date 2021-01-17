@@ -38,16 +38,18 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
+#include <ostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
-
-#include <map>
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #include <dlfcn.h>    // we require glibc >= 2.0
 #include <execinfo.h> // we require glibc >= 2.1
+#include <link.h>
 #include <unistd.h>
 
 #if (not defined(__GLIBC__)) || __GLIBC__ < 2 || __GLIBC_MINOR__ < 1
@@ -73,8 +75,11 @@ struct LineReader {
   LineReader(std::string const &path)
       : lineoffsets({{LINE_GRANULARITY + 1, 0}}), currline(1) {
     ifs.open(path, std::ios::in);
-    if (ifs.fail())
-      throw std::invalid_argument("Failed to open file");
+    if (ifs.fail()) {
+      std::stringstream ss;
+      ss << "Failed to open source file " << path;
+      throw std::invalid_argument(ss.str());
+    }
   }
 
   std::string read_line(size_t const linenr) {
@@ -166,6 +171,8 @@ parse_line: // yuck
 // don't ever do this either
 size_t split_path_filename(std::string const &path) {
   size_t pos = path.rfind('/');
+  if (pos == std::string::npos)
+    return 0;
   while (pos > 0 && path[pos - 1] == '\\')
     pos = path.rfind('/', pos - 2);
   return pos;
@@ -251,22 +258,67 @@ struct Frameinfo {
   }
 };
 
+#ifdef BACKTRACE_DEBUG
+struct Logger {
+  bool print_preamble = true;
+  template <typename T> Logger operator<<(T const &v) const {
+    if (print_preamble)
+      std::cerr << "[backtrace] ";
+    std::cerr << v;
+    return {false};
+  }
+  Logger operator<<(std::ostream &(*f)(std::ostream &)) const {
+    if (print_preamble)
+      std::cerr << "[backtrace] ";
+    f(std::cerr);
+    return {false};
+  }
+};
+#else
+struct Logger : std::ostream {
+  template <typename T> Logger const &operator<<(T const &v) const {
+    return *this;
+  }
+  Logger const &operator<<(std::ostream &(*f)(std::ostream &)) const {
+    return *this;
+  }
+};
+#endif
+
 } // namespace _nice_backtrace_detail
 
 void print_backtrace(size_t const skip_frames = 1) {
+  _nice_backtrace_detail::Logger const LOGGER;
+
   static constexpr size_t const MAX_DEPTH = 64;
 
   void *bt_buf[MAX_DEPTH];
   int const stack_depth = backtrace(&bt_buf[0], MAX_DEPTH);
 
+  LOGGER << "obtained backtrace through " << stack_depth << " many frames"
+         << std::endl;
+
   Dl_info dlinfos[MAX_DEPTH];
+  struct link_map *lmaps[MAX_DEPTH];
   std::multimap<std::string, size_t> dynamic_objects;
   for (size_t i = skip_frames; i < stack_depth; ++i) {
-    if (dladdr(bt_buf[i], &dlinfos[i]) == 0)
+    LOGGER << "looking up dynamic link info for frame " << i
+           << " with return addr. " << std::hex << bt_buf[i] << std::dec
+           << std::endl;
+
+    if (dladdr1(bt_buf[i], &dlinfos[i], (void **)&lmaps[i], RTLD_DL_LINKMAP) ==
+        0)
       std::cerr << "WARNING: failed to trace an address"
                 << std::endl; // TODO: remove
-    else
+    else {
       dynamic_objects.emplace(dlinfos[i].dli_fname, i);
+      LOGGER << "Got dynamic link info: " << '\n'
+             << "  Filename: " << dlinfos[i].dli_fname << '\n'
+             << "  Load address: " << dlinfos[i].dli_fbase << '\n'
+             << "  Nearest symbol: " << dlinfos[i].dli_sname << '\n'
+             << "  Nearest symb. address: " << std::hex << dlinfos[i].dli_saddr
+             << std::dec << std::endl;
+    }
   }
 
   // call addr2line to get line numbers for each dynamic object
@@ -287,6 +339,8 @@ void print_backtrace(size_t const skip_frames = 1) {
     char *command = (char *)std::calloc(command_len, sizeof(char));
     char *p = command +
               std::sprintf(command, "%s %s", command_base, it->first.c_str());
+
+    LOGGER << "obtaining ELF offsets for " << it->first << std::endl;
     for (auto dyobj = range.first; dyobj != range.second; ++dyobj) {
       size_t const i = dyobj->second;
       p += std::sprintf(p, " %p",
@@ -295,7 +349,8 @@ void print_backtrace(size_t const skip_frames = 1) {
                         // i.e. the address of the next instruction after the
                         // call, but we actually want to print the trace of the
                         // call instruction.
-                        (char *)bt_buf[i] - 1 - (size_t)dlinfos[i].dli_fbase);
+                        (char *)bt_buf[i] - 1 - (size_t)(lmaps[i]->l_addr));
+
       if (p - command > command_len) {
         // this should be unreachable but just to be safe
         std::cerr << "buffer overflow generating addr2line command, panicking"
@@ -303,6 +358,8 @@ void print_backtrace(size_t const skip_frames = 1) {
         std::exit(-1);
       }
     }
+
+    LOGGER << "constructed addr2line command:\n  " << command << std::endl;
 
     // invoke and read output
     FILE *cfd = popen(command, "r"); // POSIX only
@@ -336,6 +393,13 @@ void print_backtrace(size_t const skip_frames = 1) {
 
       finfo.linenr =
           std::strtoull(locspec.c_str() + colon_idx + 1, nullptr, 10);
+
+      LOGGER << "addr2line determined data for frame " << i << ":\n"
+             << "  Symbol: " << finfo.symbol << '\n'
+             << "  Source locspec: " << locspec << '\n'
+             << "  Parsed&shortened source file path: "
+             << finfo.source_file_path << '\n'
+             << "  Parsed line number: " << finfo.linenr << std::endl;
     }
 
     std::free(command);
@@ -351,18 +415,27 @@ void print_backtrace(size_t const skip_frames = 1) {
           max_line_digits, (size_t)std::ceil(std::log10(frameinfos[i].linenr)));
   }
 
+  LOGGER << "Determined max. linenr digits: " << max_line_digits
+         << " -- now printing trace" << std::endl;
+
   std::map<std::string, _nice_backtrace_detail::LineReader> linereaders;
   for (size_t i = skip_frames; i < stack_depth; ++i) {
     frameinfos[i].print();
     if (frameinfos[i].source_file_path.length() == 0)
       continue;
 
-    auto it = linereaders.emplace(frameinfos[i].source_file_path,
-                                  frameinfos[i].source_file_path);
-    _nice_backtrace_detail::LineReader &reader = it.first->second;
+    try {
+      auto it = linereaders.emplace(frameinfos[i].source_file_path,
+                                    frameinfos[i].source_file_path);
+      _nice_backtrace_detail::LineReader &reader = it.first->second;
 
-    if (frameinfos[i].linenr != 0)
-      print_context(reader, max_line_digits, frameinfos[i].linenr);
+      if (frameinfos[i].linenr != 0)
+        print_context(reader, max_line_digits, frameinfos[i].linenr);
+    } catch (std::invalid_argument const &ex) {
+      std::cerr << "\033[31;1m  " << std::setw(max_line_digits)
+                << frameinfos[i].linenr << " │\033[0;90m " << ex.what()
+                << "\033[0m" << std::endl;
+    }
   }
 }
 
