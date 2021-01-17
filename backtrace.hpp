@@ -172,7 +172,7 @@ parse_line: // yuck
 size_t split_path_filename(std::string const &path) {
   size_t pos = path.rfind('/');
   if (pos == std::string::npos)
-    return 0;
+    return -1;
   while (pos > 0 && path[pos - 1] == '\\')
     pos = path.rfind('/', pos - 2);
   return pos;
