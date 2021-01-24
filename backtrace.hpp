@@ -267,6 +267,15 @@ struct Logger {
     std::cerr << v;
     return {false};
   }
+  Logger operator<<(char const *v) const {
+    if (print_preamble)
+      std::cerr << "[backtrace] ";
+    if (v != nullptr)
+      std::cerr << v;
+    else
+      std::cerr << "<null>";
+    return {false};
+  }
   Logger operator<<(std::ostream &(*f)(std::ostream &)) const {
     if (print_preamble)
       std::cerr << "[backtrace] ";
