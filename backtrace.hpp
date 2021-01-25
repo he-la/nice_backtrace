@@ -53,7 +53,7 @@
 #include <unistd.h>
 
 #if (not defined(__GLIBC__)) || __GLIBC__ < 2 || __GLIBC_MINOR__ < 1
-#error backtrace requires glic version 2.1 or greater. Using gcc on any modern linux system should work.
+#error backtrace requires glibc version 2.1 or greater. Using gcc on any modern linux system should work.
 #endif
 #if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
 #error Windows paths not supported
